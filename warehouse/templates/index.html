@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>事实仓库汇总控制台</title>
+<style>
+  /* 设计令牌:取自 dataviz 参考调色板(亮/暗双模式) */
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb; --surface-2: #f9f9f7;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #898781;
+    --series-1: #2a78d6;
+    --gridline: #e1e0d9; --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --delta-up: #006300; --delta-down: #d03b3b;
+    --on-fill: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --surface-2: #0d0d0d;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #898781;
+      --series-1: #3987e5;
+      --gridline: #2c2c2a; --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --delta-up: #0ca30c; --delta-down: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-2); }
+  .viz-root {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary); max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .sub { color: var(--text-secondary); font-size: 12.5px; }
+  header.top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+  header.top .spacer { flex: 1; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 16px;
+  }
+  button, select, input[type=text] {
+    font: inherit; font-size: 13px; color: var(--text-primary);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 7px;
+    padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--baseline); }
+  button.primary { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .tz-badge {
+    font-size: 12.5px; color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px;
+  }
+  /* KPI 行 */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+  .kpi { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .kpi .label { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .kpi .value { font-size: 22px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .kpi .meta { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+  /* 状态徽标:图标+文字,不只靠颜色 */
+  .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px;
+           border-radius: 999px; padding: 2px 8px; border: 1px solid var(--border); white-space: nowrap; }
+  .badge.good     { color: var(--good); }
+  .badge.critical { color: var(--critical); }
+  .badge.warning  { color: var(--text-secondary); }
+  .badge.muted    { color: var(--text-muted); }
+  .badge.info     { color: var(--series-1); }
+  /* 层级依赖图 */
+  .lineage-wrap { position: relative; overflow-x: auto; }
+  .lineage { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 10px 56px; position: relative; z-index: 1; }
+  .lineage h3 { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 8px; font-weight: 600; }
+  .runbox {
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; margin-bottom: 8px;
+    font-size: 12px; background: var(--surface-1); cursor: pointer; position: relative;
+  }
+  .runbox:hover { border-color: var(--series-1); }
+  .runbox.selected { outline: 2px solid var(--series-1); }
+  .runbox.current::after { content: "当前"; position: absolute; top: 6px; right: 8px;
+    font-size: 10.5px; color: var(--series-1); }
+  .runbox .rid { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .runbox .rmeta { color: var(--text-muted); margin-top: 2px; line-height: 1.5; }
+  .runbox.failed { border-color: var(--critical); }
+  svg#wires { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+  svg#wires path { stroke: var(--baseline); stroke-width: 1.5; fill: none; }
+  svg#wires path.lag { stroke: var(--critical); stroke-dasharray: 4 3; }
+  /* 表格 */
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gridline); }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.total td { font-weight: 600; border-top: 1px solid var(--baseline); }
+  .delta-up { color: var(--delta-up); }
+  .delta-down { color: var(--delta-down); }
+  /* 表内细条:单色相顺序编码 */
+  .bar-cell { min-width: 120px; }
+  .bar { height: 8px; background: var(--series-1); border-radius: 0 4px 4px 0; }
+  .tabs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .tabs button.active { background: var(--series-1); color: #fff; border-color: var(--series-1); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+  textarea {
+    width: 100%; min-height: 120px; font: 12px/1.5 ui-monospace, monospace;
+    background: var(--surface-2); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px;
+  }
+  .toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--text-primary); color: var(--surface-1); padding: 8px 16px;
+    border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; z-index: 9;
+    max-width: 80vw; white-space: pre-wrap;
+  }
+  .toast.show { opacity: .95; }
+  .legend-hint { font-size: 11.5px; color: var(--text-muted); margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <header class="top">
+    <h1>事实仓库汇总控制台</h1>
+    <span class="tz-badge" id="tzBadge">时区 …</span>
+    <span class="sub" id="nowLine"></span>
+    <span class="spacer"></span>
+    <button class="primary" id="btnRun">运行增量汇总</button>
+    <button id="btnRebuild" title="重算全部桶">全量重建</button>
+    <select id="failSelect" title="演练:在指定层事务内注入失败,验证上一版保留">
+      <option value="">演练:模拟失败…</option>
+      <option value="day">day 层失败</option>
+      <option value="week">week 层失败</option>
+      <option value="month">month 层失败</option>
+    </select>
+    <input type="text" id="tzInput" placeholder="时区,如 UTC" size="14">
+    <button id="btnTz">切换时区并重建</button>
+  </header>
+
+  <!-- 一致性总览:KPI 行 -->
+  <div class="card">
+    <h2>一致性总览 <span class="sub" id="consistencyHint"></span></h2>
+    <div class="kpis" id="kpis"></div>
+  </div>
+
+  <!-- 层级依赖 -->
+  <div class="card">
+    <h2>层级依赖 <span class="sub">day → week / month,连线为血缘(week/month 由哪个 day 版本上卷);红色虚线 = 层级滞后待补跑。点击 run 查看更正影响。</span></h2>
+    <div class="lineage-wrap">
+      <svg id="wires"></svg>
+      <div class="lineage" id="lineage"></div>
+    </div>
+    <div class="legend-hint">状态:✓ 成功 · ✗ 失败(上一版仍可查)· ○ 空跑(无脏数据,如重复回补后)· ⏳ 运行中</div>
+  </div>
+
+  <div class="grid2">
+    <!-- 汇总数据 + 版本切换 -->
+    <div class="card">
+      <h2>汇总数据 <span class="sub">版本可切换,默认当前指针</span></h2>
+      <div class="tabs" id="levelTabs">
+        <button data-level="day" class="active">日</button>
+        <button data-level="week">周</button>
+        <button data-level="month">月</button>
+        <select id="versionSelect"></select>
+        <span class="sub" id="aggRunMeta"></span>
+      </div>
+      <div style="max-height: 420px; overflow: auto;">
+        <table id="aggTable"></table>
+      </div>
+    </div>
+
+    <!-- 更正影响 -->
+    <div class="card">
+      <h2>更正影响 <span class="sub">选中 run 触及桶的旧值 → 新值,及水位线区间内的贡献事件</span></h2>
+      <div class="tabs">
+        <select id="impactSelect"></select>
+        <span class="sub" id="impactMeta"></span>
+      </div>
+      <div style="max-height: 210px; overflow: auto;"><table id="deltaTable"></table></div>
+      <div style="max-height: 180px; overflow: auto; margin-top: 8px;"><table id="impactEvents"></table></div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <!-- 核对值 -->
+    <div class="card">
+      <h2>核对值 <span class="sub">每个 run 的控制总额:事件层 vs 本层,必须一致才切换指针</span></h2>
+      <div style="max-height: 320px; overflow: auto;"><table id="reconTable"></table></div>
+    </div>
+
+    <!-- 摄取日志 -->
+    <div class="card">
+      <h2>摄取日志 <span class="sub">迟到数据与重复回补在此留痕</span></h2>
+      <div class="tabs" id="logFilters">
+        <button data-f="all" class="active">全部</button>
+        <button data-f="late">迟到</button>
+        <button data-f="correction">更正</button>
+        <button data-f="duplicate">重复回补</button>
+        <button data-f="bad">异常(stale/conflict/error)</button>
+      </div>
+      <div style="max-height: 280px; overflow: auto;"><table id="logTable"></table></div>
+    </div>
+  </div>
+
+  <!-- 手动摄取 -->
+  <div class="card">
+    <h2>手动摄取 <span class="sub">粘贴事件 JSON 数组提交;同 event_id + 更高 record_version = 更正,同内容重投 = 幂等去重</span></h2>
+    <textarea id="ingestBox">[
+  {"event_id": "MANUAL-1", "record_version": 1, "occurred_at": "2026-10-28T09:00:00+08:00", "region": "华东", "amount": 66.5, "qty": 1}
+]</textarea>
+    <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
+      <button class="primary" id="btnIngest">提交摄取</button>
+      <span class="sub" id="ingestResult"></span>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmtMoney = (c) => c == null ? "—" : (c / 100).toLocaleString("zh-CN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const fmtNum = (n) => n == null ? "—" : Number(n).toLocaleString("zh-CN");
+const LEVEL_NAME = {day: "日", week: "周", month: "月", events: "事件层"};
+
+let STATE = null;
+let currentLevel = "day";
+let selectedImpactRun = null;
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+function statusBadge(run) {
+  if (!run) return "";
+  if (run.status === "success" && run.noop) return `<span class="badge muted">○ 空跑</span>`;
+  if (run.status === "success") return `<span class="badge good">✓ 成功</span>`;
+  if (run.status === "failed") return `<span class="badge critical">✗ 失败</span>`;
+  return `<span class="badge warning">⏳ 运行中</span>`;
+}
+function actionBadge(a, isLate) {
+  const map = {insert: ["info", "新增"], correction: ["warning", "更正"], duplicate: ["muted", "重复"],
+               stale: ["critical", "过旧"], conflict: ["critical", "冲突"], error: ["critical", "错误"]};
+  const [cls, label] = map[a] || ["muted", a];
+  const late = isLate ? ` <span class="badge warning">迟到</span>` : "";
+  return `<span class="badge ${cls}">${label}</span>${late}`;
+}
+function deltaCell(oldV, newV, fmt) {
+  if (oldV == null || newV == null) return "";
+  const d = newV - oldV;
+  if (d === 0) return `<span class="sub">±0</span>`;
+  const cls = d > 0 ? "delta-up" : "delta-down";
+  const arrow = d > 0 ? "▲" : "▼";
+  return `<span class="${cls}">${arrow} ${fmt(Math.abs(d))}</span>`;
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// ---------------------------------------------------------- 一致性 KPI
+function renderConsistency() {
+  const cs = STATE.consistency;
+  const lv = cs.levels;
+  const cards = [];
+  cards.push(`<div class="kpi"><div class="label">事件层(水位线 ${cs.watermark})</div>
+    <div class="value">¥ ${fmtMoney(cs.events.amount_cents)}</div>
+    <div class="meta">${fmtNum(cs.events.events)} 单 · ${fmtNum(cs.events.qty)} 件</div></div>`);
+  for (const level of ["day", "week", "month"]) {
+    const L = lv[level];
+    if (!L) {
+      cards.push(`<div class="kpi"><div class="label">${LEVEL_NAME[level]}层</div>
+        <div class="value sub">未汇总</div><div class="meta">—</div></div>`);
+      continue;
+    }
+    const badge = L.match
+      ? `<span class="badge good">✓ 一致</span>`
+      : `<span class="badge critical">✗ 不符</span>`;
+    cards.push(`<div class="kpi"><div class="label">${LEVEL_NAME[level]}层 · run #${L.run_id} ${badge}</div>
+      <div class="value">¥ ${fmtMoney(L.amount_cents)}</div>
+      <div class="meta">水位线 ${L.wm_to} · ${fmtNum(L.events)} 单 · ${fmtNum(L.qty)} 件</div></div>`);
+  }
+  $("#kpis").innerHTML = cards.join("");
+  const hints = [];
+  if (!cs.same_watermark) hints.push("层级水位线不一致:存在失败待重试或进行中任务");
+  if (cs.same_watermark && cs.all_match) hints.push("三级与事件层同水位线且总额一致");
+  $("#consistencyHint").textContent = hints.join(";");
+}
+
+// ---------------------------------------------------------- 层级依赖图
+function renderLineage() {
+  const byLevel = {day: [], week: [], month: []};
+  for (const r of STATE.runs) {
+    if (byLevel[r.level] && byLevel[r.level].length < 12) byLevel[r.level].push(r);
+  }
+  const ptr = STATE.pointers;
+  const html = ["day", "week", "month"].map((level) => {
+    const boxes = byLevel[level].map((r) => {
+      const cur = ptr[level] && ptr[level].run_id === r.run_id ? " current" : "";
+      const failed = r.status === "failed" ? " failed" : "";
+      const sel = selectedImpactRun === r.run_id ? " selected" : "";
+      const lineage = r.day_run_id ? ` ← day #${r.day_run_id}` : "";
+      const err = r.error ? `<div class="rmeta" style="color:var(--critical)">${r.error}</div>` : "";
+      return `<div class="runbox${cur}${failed}${sel}" data-run="${r.run_id}" data-day-run="${r.day_run_id || ""}">
+        <span class="rid">#${r.run_id}</span> ${statusBadge(r)}
+        <div class="rmeta">水位线 ${r.wm_from}→${r.wm_to}${lineage}<br>
+        触桶 ${r.buckets_touched} · 写行 ${r.rows_written} · ${r.finished_at || ""}</div>${err}
+      </div>`;
+    }).join("");
+    return `<div><h3>${LEVEL_NAME[level]}层 ${ptr[level] ? `<span class="sub">指针 #${ptr[level].run_id}</span>` : ""}</h3>${boxes || '<div class="sub">暂无 run</div>'}</div>`;
+  }).join("");
+  $("#lineage").innerHTML = html;
+  document.querySelectorAll(".runbox").forEach((el) => {
+    el.addEventListener("click", () => {
+      selectedImpactRun = Number(el.dataset.run);
+      renderLineage();
+      loadImpact(selectedImpactRun);
+    });
+  });
+  drawWires();
+}
+
+function drawWires() {
+  const svg = $("#wires");
+  const wrap = $(".lineage-wrap");
+  const wr = wrap.getBoundingClientRect();
+  svg.setAttribute("width", wrap.scrollWidth);
+  svg.setAttribute("height", wrap.scrollHeight);
+  const ptrDay = STATE.pointers.day ? STATE.pointers.day.run_id : null;
+  const ptrIds = new Set(["week", "month"].map((l) => STATE.pointers[l] && STATE.pointers[l].run_id));
+  let paths = "";
+  document.querySelectorAll(".runbox[data-day-run]").forEach((el) => {
+    const dayId = el.dataset.dayRun;
+    if (!dayId) return;
+    const src = document.querySelector(`.runbox[data-run="${dayId}"]`);
+    if (!src) return;
+    const a = src.getBoundingClientRect(), b = el.getBoundingClientRect();
+    const x1 = a.right - wr.left, y1 = a.top + a.height / 2 - wr.top;
+    const x2 = b.left - wr.left, y2 = b.top + b.height / 2 - wr.top;
+    const mx = (x1 + x2) / 2;
+    // 仅当该 box 是本层当前指针且血缘落后于 day 指针时,标红虚线提示滞后
+    const lag = ptrIds.has(Number(el.dataset.run)) && Number(dayId) !== ptrDay ? " class='lag'" : "";
+    paths += `<path${lag} d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`;
+  });
+  svg.innerHTML = paths;
+}
+
+// ---------------------------------------------------------- 汇总数据表(版本切换)
+async function loadAgg(runId) {
+  const q = runId ? `&run_id=${runId}` : "";
+  const j = await api(`/api/agg?level=${currentLevel}${q}`);
+  const sel = $("#versionSelect");
+  sel.innerHTML = j.versions.map((v) =>
+    `<option value="${v.run_id}" ${v.run_id === j.run_id ? "selected" : ""}>
+      #${v.run_id} · 水位线 ${v.wm_to} · ${v.noop ? "空跑" : `触桶 ${v.buckets_touched}`} · ${v.finished_at || ""}
+    </option>`).join("");
+  $("#aggRunMeta").textContent = j.run
+    ? `版本 run #${j.run_id}${STATE.pointers[currentLevel] && STATE.pointers[currentLevel].run_id === j.run_id ? "(当前指针)" : "(历史版本)"}`
+    : "暂无版本";
+  // 按桶聚合行(跨分区合计),用于表内条形
+  const rows = j.rows;
+  const totals = rows.reduce((a, r) => ({amount: a.amount + r.amount_cents, qty: a.qty + r.qty, events: a.events + r.events}),
+                             {amount: 0, qty: 0, events: 0});
+  const maxAmt = Math.max(1, ...rows.map((r) => r.amount_cents));
+  let head = `<tr><th>桶</th><th>分区</th><th class="num">金额</th><th class="num">单数</th><th class="num">件数</th><th></th></tr>`;
+  if (currentLevel === "week") head = `<tr><th>ISO 周</th><th>起止(本地日)</th><th>分区</th><th class="num">金额</th><th class="num">单数</th><th class="num">件数</th><th></th></tr>`;
+  const body = rows.map((r) => {
+    const bar = `<td class="bar-cell"><div class="bar" style="width:${Math.max(2, r.amount_cents / maxAmt * 100)}%"></div></td>`;
+    if (currentLevel === "week") {
+      return `<tr><td>${r.bucket}</td><td class="sub">${r.week_start} ~ ${r.week_end}</td><td>${r.region}</td>
+        <td class="num">${fmtMoney(r.amount_cents)}</td><td class="num">${fmtNum(r.events)}</td><td class="num">${fmtNum(r.qty)}</td>${bar}</tr>`;
+    }
+    return `<tr><td>${r.bucket}</td><td>${r.region}</td>
+      <td class="num">${fmtMoney(r.amount_cents)}</td><td class="num">${fmtNum(r.events)}</td><td class="num">${fmtNum(r.qty)}</td>${bar}</tr>`;
+  }).join("");
+  const totalCols = currentLevel === "week" ? 3 : 2;
+  $("#aggTable").innerHTML = head + body +
+    `<tr class="total"><td colspan="${totalCols}">合计</td><td class="num">${fmtMoney(totals.amount)}</td>
+     <td class="num">${fmtNum(totals.events)}</td><td class="num">${fmtNum(totals.qty)}</td><td></td></tr>`;
+}
+
+// ---------------------------------------------------------- 更正影响
+function renderImpactSelect() {
+  const sel = $("#impactSelect");
+  const runs = STATE.runs.filter((r) => r.status === "success" && r.buckets_touched > 0);
+  if (!selectedImpactRun && runs.length) selectedImpactRun = runs[0].run_id;
+  sel.innerHTML = runs.map((r) =>
+    `<option value="${r.run_id}" ${r.run_id === selectedImpactRun ? "selected" : ""}>
+      ${LEVEL_NAME[r.level]} #${r.run_id} · 水位线 ${r.wm_from}→${r.wm_to} · 触桶 ${r.buckets_touched}
+    </option>`).join("");
+}
+
+async function loadImpact(runId) {
+  if (!runId) { $("#deltaTable").innerHTML = ""; $("#impactEvents").innerHTML = ""; return; }
+  const j = await api(`/api/runs/${runId}/impact`);
+  $("#impactMeta").textContent = `${LEVEL_NAME[j.run.level]}层 run #${j.run.run_id} · ${j.run.finished_at || ""}`;
+  const dh = `<tr><th>桶</th><th>分区</th><th class="num">旧金额</th><th class="num">新金额</th><th class="num">Δ金额</th>
+              <th class="num">旧单数</th><th class="num">新单数</th><th class="num">Δ单数</th></tr>`;
+  $("#deltaTable").innerHTML = dh + j.deltas.map((d) => `<tr>
+    <td>${d.bucket}</td><td>${d.region}</td>
+    <td class="num">${d.old_amount_cents == null ? '<span class="sub">新桶</span>' : fmtMoney(d.old_amount_cents)}</td>
+    <td class="num">${d.new_amount_cents == null ? '<span class="sub">已清空</span>' : fmtMoney(d.new_amount_cents)}</td>
+    <td class="num">${deltaCell(d.old_amount_cents, d.new_amount_cents, fmtMoney)}</td>
+    <td class="num">${fmtNum(d.old_events)}</td><td class="num">${fmtNum(d.new_events)}</td>
+    <td class="num">${deltaCell(d.old_events, d.new_events, fmtNum)}</td></tr>`).join("");
+  const eh = `<tr><th>seq</th><th>事件</th><th>版本</th><th>动作</th><th>本地日</th><th>分区</th><th class="num">金额</th></tr>`;
+  $("#impactEvents").innerHTML = eh + j.events.map((e) => `<tr>
+    <td class="num">${e.ingest_seq}</td><td>${e.event_id}</td><td>v${e.record_version}</td>
+    <td>${actionBadge(e.action, e.is_late)}</td><td>${e.day_local}</td><td>${e.region}</td>
+    <td class="num">${fmtMoney(e.amount_cents)}</td></tr>`).join("");
+}
+
+// ---------------------------------------------------------- 核对值
+function renderRecon() {
+  const rows = [];
+  for (const r of STATE.runs.slice(0, 20)) {
+    const recs = STATE.recon[r.run_id] || [];
+    if (!recs.length) continue;
+    const ev = recs.find((x) => x.level === "events");
+    const mine = recs.find((x) => x.level !== "events");
+    const ok = ev && mine && ev.total_amount_cents === mine.total_amount_cents
+               && ev.total_qty === mine.total_qty && ev.total_events === mine.total_events;
+    rows.push(`<tr>
+      <td>${LEVEL_NAME[r.level]} #${r.run_id}</td><td>${statusBadge(r)}</td>
+      <td class="num">${ev ? fmtMoney(ev.total_amount_cents) : "—"}</td>
+      <td class="num">${mine ? fmtMoney(mine.total_amount_cents) : "—"}</td>
+      <td class="num">${ev ? fmtNum(ev.total_events) : "—"}</td>
+      <td class="num">${mine ? fmtNum(mine.total_events) : "—"}</td>
+      <td>${ok ? '<span class="badge good">✓ 一致</span>' : '<span class="badge critical">✗ 不符</span>'}</td></tr>`);
+  }
+  $("#reconTable").innerHTML =
+    `<tr><th>run</th><th>状态</th><th class="num">事件层金额</th><th class="num">本层金额</th>
+     <th class="num">事件层单数</th><th class="num">本层单数</th><th>核对</th></tr>` + rows.join("");
+}
+
+// ---------------------------------------------------------- 摄取日志
+let logFilter = "all";
+function renderLog() {
+  const items = STATE.ingest_log.filter((l) => {
+    if (logFilter === "all") return true;
+    if (logFilter === "late") return l.is_late;
+    if (logFilter === "bad") return ["stale", "conflict", "error"].includes(l.action);
+    return l.action === logFilter;
+  });
+  $("#logTable").innerHTML =
+    `<tr><th>时间</th><th>批次</th><th>事件</th><th>版本</th><th>动作</th><th>本地日</th><th>说明</th></tr>` +
+    items.map((l) => `<tr>
+      <td class="sub">${l.created_at}</td><td class="num">${l.batch_id}</td>
+      <td>${l.event_id}</td><td>v${l.record_version}</td>
+      <td>${actionBadge(l.action, l.is_late)}</td><td>${l.day_local || "—"}</td>
+      <td class="sub">${l.detail || ""}</td></tr>`).join("");
+}
+
+// ---------------------------------------------------------- 加载与动作
+async function loadState() {
+  STATE = await api("/api/state");
+  $("#tzBadge").textContent = `时区 ${STATE.tz}`;
+  $("#tzInput").value = STATE.tz;
+  $("#nowLine").textContent = `服务时间 ${STATE.now}`;
+  renderConsistency();
+  renderLineage();
+  renderImpactSelect();
+  renderRecon();
+  renderLog();
+}
+
+$("#levelTabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-level]");
+  if (!b) return;
+  currentLevel = b.dataset.level;
+  document.querySelectorAll("#levelTabs button[data-level]").forEach((x) => x.classList.toggle("active", x === b));
+  loadAgg();
+});
+$("#versionSelect").addEventListener("change", (e) => loadAgg(Number(e.target.value)));
+$("#impactSelect").addEventListener("change", (e) => {
+  selectedImpactRun = Number(e.target.value);
+  renderLineage();
+  loadImpact(selectedImpactRun);
+});
+$("#logFilters").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-f]");
+  if (!b) return;
+  logFilter = b.dataset.f;
+  document.querySelectorAll("#logFilters button").forEach((x) => x.classList.toggle("active", x === b));
+  renderLog();
+});
+
+async function runAggregate(extra) {
+  const j = await api("/api/aggregate", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(extra || {}),
+  });
+  const parts = Object.entries(j.runs).map(([lv, r]) =>
+    `${LEVEL_NAME[lv]}#${r.run_id}:${r.status === "success" ? (r.noop ? "空跑" : "成功") : "失败"}`);
+  toast(`汇总完成:${parts.join(" · ")}`);
+  await loadState();
+  await loadAgg();
+  if (selectedImpactRun) await loadImpact(selectedImpactRun);
+}
+$("#btnRun").addEventListener("click", () => runAggregate().catch((e) => toast(`失败:${e.message}`)));
+$("#btnRebuild").addEventListener("click", () => runAggregate({full_rebuild: true}).catch((e) => toast(`失败:${e.message}`)));
+$("#failSelect").addEventListener("change", (e) => {
+  if (!e.target.value) return;
+  runAggregate({simulate_failure: e.target.value}).catch((err) => toast(`失败:${err.message}`));
+  e.target.value = "";
+});
+$("#btnTz").addEventListener("click", async () => {
+  try {
+    const j = await api("/api/config/tz", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({tz: $("#tzInput").value.trim()}),
+    });
+    toast(`已切换时区为 ${j.tz} 并全量重建`);
+    await loadState();
+    await loadAgg();
+  } catch (e) { toast(`失败:${e.message}`); }
+});
+$("#btnIngest").addEventListener("click", async () => {
+  try {
+    const events = JSON.parse($("#ingestBox").value);
+    const j = await api("/api/ingest", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({events, source: "manual"}),
+    });
+    const c = j.counts;
+    $("#ingestResult").textContent =
+      `批次 #${j.batch_id}:新增 ${c.insert} · 更正 ${c.correction} · 重复 ${c.duplicate} · 过旧 ${c.stale} · 冲突 ${c.conflict} · 错误 ${c.error}`;
+    await loadState();
+  } catch (e) { toast(`摄取失败:${e.message}`); }
+});
+
+window.addEventListener("resize", drawWires);
+(async () => { await loadState(); await loadAgg(); if (selectedImpactRun) await loadImpact(selectedImpactRun); })();
+</script>
+</body>
+</html>
